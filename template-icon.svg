@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 800 800" width="800" height="800">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#15171A"/>
+      <stop offset="100%" stop-color="#1E88E5"/>
+    </linearGradient>
+    <polygon id="spike" points="372,225 400,158 428,225"/>
+  </defs>
+  <rect x="0" y="0" width="800" height="800" rx="120" fill="url(#bg)"/>
+  <g fill="#FFFFFF">
+    <use xlink:href="#spike" href="#spike"/>
+    <use xlink:href="#spike" href="#spike" transform="rotate(30 400 420)"/>
+    <use xlink:href="#spike" href="#spike" transform="rotate(60 400 420)"/>
+    <use xlink:href="#spike" href="#spike" transform="rotate(90 400 420)"/>
+    <use xlink:href="#spike" href="#spike" transform="rotate(120 400 420)"/>
+    <use xlink:href="#spike" href="#spike" transform="rotate(150 400 420)"/>
+    <use xlink:href="#spike" href="#spike" transform="rotate(180 400 420)"/>
+    <use xlink:href="#spike" href="#spike" transform="rotate(210 400 420)"/>
+    <use xlink:href="#spike" href="#spike" transform="rotate(240 400 420)"/>
+    <use xlink:href="#spike" href="#spike" transform="rotate(270 400 420)"/>
+    <use xlink:href="#spike" href="#spike" transform="rotate(300 400 420)"/>
+    <use xlink:href="#spike" href="#spike" transform="rotate(330 400 420)"/>
+    <polygon points="218,392 100,342 100,498 218,448"/>
+    <circle cx="400" cy="420" r="205"/>
+  </g>
+  <circle cx="478" cy="372" r="27" fill="#15171A"/>
+</svg>

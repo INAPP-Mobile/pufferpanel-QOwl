@@ -1,0 +1,160 @@
+#!/bin/sh
+set -e
+
+# Railway wrapper for the upstream PufferPanel image.
+# Upstream entrypoint.sh does: `pufferpanel db upgrade` then `exec pufferpanel run`.
+# This wrapper handles first-boot admin bootstrap + Railway-specific env fixes.
+
+DB="/var/lib/pufferpanel/database.db"
+MARKER="/var/lib/pufferpanel/.admin-bootstrapped"
+PUFFER_CONFIG_TARGET="/var/lib/pufferpanel/config.json"
+
+# --- Persist panel config on the volume -----------------------------------------
+# Upstream ships /etc/pufferpanel/config.json (SQLite path, log folder, daemon
+# root). Copy it to the volume so the auto-generated session key (written to
+# this file by `panel.sessionKey.Set(..., save=true)`) survives redeploys
+# instead of rotating and logging every user out.
+export PUFFER_CONFIG="${PUFFER_CONFIG_TARGET}"
+if [ ! -f "$PUFFER_CONFIG_TARGET" ] && [ -f /etc/pufferpanel/config.json ]; then
+  echo "[pufferpanel-railway] Seeding panel config on persistent volume"
+  cp /etc/pufferpanel/config.json "$PUFFER_CONFIG_TARGET"
+fi
+
+# --- Railway env fixes ------------------------------------------------------------
+# 1. disableUnshare=true: Railway lacks CAP_SYS_ADMIN, so upstream's
+#    unshare(CLONE_NEWUSER|...) sandbox fails with EPERM at server start.
+#    Game servers therefore run as plain host processes under the panel.
+export PUFFER_SECURITY_DISABLEUNSHARE=true
+
+# 2. Docker root MUST be non-empty: with PUFFER_PLATFORM=docker (upstream ENV)
+#    and an empty docker root, the daemon probes /var/run/docker.sock on boot,
+#    fails (no socket on Railway), and the whole panel exits — restart loop.
+#    A non-empty PUFFER_DOCKER_ROOT short-circuits that probe.
+export PUFFER_DOCKER_ROOT="/var/lib/pufferpanel/docker"
+
+# 3. disallowHost must be FALSE: upstream image sets it true, which strips
+#    host/tty/standard from the environment list. With Docker unavailable
+#    that would leave ZERO selectable environments for new servers. Keep
+#    host environments offered; disableUnshare makes them actually runnable.
+export PUFFER_DOCKER_DISALLOWHOST=false
+
+# 4. Web host: bind 0.0.0.0 on Railway's injected PORT (upstream default 8080).
+export PUFFER_WEB_HOST="0.0.0.0:${PORT:-8080}"
+
+# 5. Master URL: what the panel reports as the local node address (shown in
+#    UI, used for SFTP connection info). Point at the public domain.
+export PUFFER_PANEL_SETTINGS_MASTERURL="${RAILWAY_PUBLIC_DOMAIN:-localhost}:${PORT:-8080}"
+
+# --- First-boot admin bootstrap ---------------------------------------------------
+# `pufferpanel user add` needs the DB schema, so run db upgrade first (it is
+# idempotent; upstream entrypoint runs it again). Marker file on the volume
+# prevents repeat attempts after success. Validation is done here (not by
+# letting the binary fail) so a misconfigured password cannot restart-loop
+# the container.
+ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@example.com}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
+
+if [ ! -f "$MARKER" ] && [ -n "$ADMIN_PASSWORD" ]; then
+  echo "[pufferpanel-railway] Running db upgrade"
+  /usr/sbin/pufferpanel db upgrade || echo "[pufferpanel-railway] db upgrade failed (boot will retry)"
+
+  ok=1
+  if [ "${#ADMIN_USERNAME}" -lt 5 ]; then
+    echo "[pufferpanel-railway] WARNING: ADMIN_USERNAME too short (min 5 chars) — skipping admin creation"
+    ok=0
+  fi
+  if [ "${#ADMIN_PASSWORD}" -lt 8 ]; then
+    echo "[pufferpanel-railway] WARNING: ADMIN_PASSWORD too short (min 8 chars) — skipping admin creation"
+    ok=0
+  fi
+  case "$ADMIN_EMAIL" in
+    *@*.*) : ;;
+    *) echo "[pufferpanel-railway] WARNING: ADMIN_EMAIL invalid — skipping admin creation"; ok=0 ;;
+  esac
+
+  if [ "$ok" -eq 1 ]; then
+    echo "[pufferpanel-railway] Creating admin user '$ADMIN_USERNAME'"
+    if /usr/sbin/pufferpanel user add \
+         --name "$ADMIN_USERNAME" \
+         --email "$ADMIN_EMAIL" \
+         --admin \
+         --password "$ADMIN_PASSWORD"; then
+      echo "[pufferpanel-railway] Admin user created"
+    else
+      echo "[pufferpanel-railway] Admin creation failed (may already exist) — continuing"
+    fi
+    touch "$MARKER"
+  fi
+fi
+
+# --- Runtime binary compatibility ------------------------------------------------
+# PufferPanel fetches helper binaries into the volume at runtime (DepotDownloader,
+# adoptium JREs, node). glibc-built ones run under gcompat; musl-native java/node
+# are already on PATH via Dockerfile symlinks, so javadl/nodejsdl LookPath skips
+# their glibc downloads. Defensive: ensure exec bits on volume binaries so a
+# volume restore or unzip with lost modes doesn't brick installs.
+for b in /var/lib/pufferpanel/binaries/depotdownloader/* \
+         /var/lib/pufferpanel/binaries/java* \
+         /var/lib/pufferpanel/binaries/node*; do
+  [ -f "$b" ] && chmod +x "$b" 2>/dev/null || true
+done
+
+# --- Steam SDK wiring ---------------------------------------------------------------
+# Source-game dedicated servers (7 Days to Die, Rust, Valheim, ...) dlopen
+# steamclient.so from <server>/.steam/sdk64/ but game depots don't ship it —
+# without it Steamworks init fails ("Could not initialize GameServer").
+# Materialize it once from the bundled steamcmd self-update, keep it on the
+# persistent volume (self-update needs +w on the directory), and symlink it
+# into every server dir. A 60s reconciler loop keeps new servers linked
+# without needing a container restart.
+STEAM_VOL="/var/lib/pufferpanel/steamcmd"
+link_steam_sdk() {
+  if [ -f "$STEAM_VOL/linux64/steamclient.so" ]; then
+    for d in /var/lib/pufferpanel/servers/*; do
+      [ -d "$d" ] || continue
+      mkdir -p "$d/.steam/sdk64" "$d/.steam/sdk32"
+      ln -sfn "$STEAM_VOL/linux64/steamclient.so" "$d/.steam/sdk64/steamclient.so"
+      # 32-bit steamclient: legacy srcds/hlds games (CS:S, TF2, GMod, CS 1.6)
+      # load the sdk32 variant; Valve ships it in the steamcmd self-update.
+      if [ -f "$STEAM_VOL/linux32/steamclient.so" ]; then
+        ln -sfn "$STEAM_VOL/linux32/steamclient.so" "$d/.steam/sdk32/steamclient.so"
+      fi
+    done
+  fi
+}
+if [ ! -f "$STEAM_VOL/linux64/steamclient.so" ] && [ -f /opt/steamcmd/steamcmd.sh ]; then
+  echo "[pufferpanel-railway] Materializing steamclient.so via steamcmd self-update"
+  mkdir -p "$STEAM_VOL"
+  cp -r /opt/steamcmd/. "$STEAM_VOL"/
+  chmod -R u+w "$STEAM_VOL"
+  (cd "$STEAM_VOL" && ./steamcmd.sh +quit </dev/null >/dev/null 2>&1 || true)
+fi
+link_steam_sdk
+( while :; do sleep 60; link_steam_sdk; done ) &
+
+# db upgrade is idempotent; exit 9 = nothing to run (upstream entrypoint treats
+# 0/9 as OK). The deb ships no entrypoint.sh (systemd unit runs the binary
+# directly), so replicate its boot sequence here.
+/usr/sbin/pufferpanel db upgrade
+code=$?
+if [ "$code" -ne 0 ] && [ "$code" -ne 9 ]; then
+  echo "[pufferpanel-railway] db upgrade failed with exit $code"
+  exit 1
+fi
+
+# --- playit.gg tunnel (optional) -----------------------------------------------------
+# Railway exposes only HTTP/HTTPS + TCP proxies publicly — no inbound UDP. The
+# playit agent opens an OUTBOUND tunnel, so UDP game servers (Valheim 2456,
+# Rust 28015, 7DTD 26900, CS2 27015) become joinable via the playit address.
+# Secret from https://playit.gg dashboard; port mappings are managed there
+# too (create them once pointing at 127.0.0.1:<game port> — the agent does
+# NOT auto-create mappings). Never fatal: a playit outage must not take the
+# panel down, and users without PLAYIT_SECRET are unaffected.
+if [ -n "$PLAYIT_SECRET" ] && [ -x /usr/local/bin/playitd ]; then
+  echo "[pufferpanel-railway] PLAYIT_SECRET set — starting playit.gg agent"
+  /usr/local/bin/playitd --secret "$PLAYIT_SECRET" </dev/null >>/var/lib/pufferpanel/playitd.log 2>&1 &
+  echo "[pufferpanel-railway] playit agent launched (log: /var/lib/pufferpanel/playitd.log)"
+fi
+
+exec /usr/sbin/pufferpanel run

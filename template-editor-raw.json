@@ -1,0 +1,22 @@
+{
+  "ADMIN_USERNAME": {
+    "value": "admin",
+    "description": "Admin username (min 5 chars, printable ASCII)"
+  },
+  "ADMIN_EMAIL": {
+    "value": "admin@example.com",
+    "description": "Admin email address (placeholder is fine — no SMTP configured)"
+  },
+  "ADMIN_PASSWORD": {
+    "value": "${{secret(16)}}",
+    "description": "Admin password — auto-generated, min 8 chars. Copy from the Variables tab after deploy."
+  },
+  "PUFFER_PANEL_REGISTRATIONENABLED": {
+    "value": "false",
+    "description": "Allow public self-registration (false = invite-only via admin-created accounts)"
+  },
+  "PLAYIT_SECRET": {
+    "value": "",
+    "description": "Optional playit.gg agent secret for UDP game tunnels (Valheim/Rust/7DTD/CS2). Get it at playit.gg; port mappings are managed in the playit dashboard. Leave empty if you only host TCP games (e.g. Minecraft)."
+  }
+}
